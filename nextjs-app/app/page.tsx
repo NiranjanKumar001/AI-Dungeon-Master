@@ -4,8 +4,8 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 export default function Home() {
-  const [loading, setLoading] = useState(false);
-  const [code, setCode] = useState("");
+  const [loading, setLoading] = useState<boolean>(false);
+  const [code, setCode] = useState<string>("");
   const router = useRouter();
 
   function generateRoomCode() {
