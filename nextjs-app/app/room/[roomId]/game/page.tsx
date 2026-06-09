@@ -5,6 +5,7 @@ import dynamic from "next/dynamic"
 const GameCanvas = dynamic(
     () => import("@/components/GameCanvas"),
     {
+        ssr: false,
         loading: () => (
             <div className="flex items-center justify-center h-screen bg-gray-950 text-white">
                 <div className="text-center space-y-4">
