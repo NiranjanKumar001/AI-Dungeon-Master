@@ -1,134 +1,150 @@
-import 'dotenv/config'
-import http from 'http'
-import { WebSocketServer, WebSocket } from 'ws'
-import { v4 as uuid } from 'uuid'
-import { handleRequest } from './api/router'
-import { roomManager } from './game/RoomManager'
-import { startLoop, stopLoop } from './game/GameLoop'
-import { connectRedis } from './db/redis'
-import { startHeartbeat } from './cluster/Heartbeat'
-import { releaseRoom } from './cluster/RoomRegistry'
-import { toPublic } from './types'
-import type { ClientMessage, GameState } from './types'
+import http from "http"
+import { WebSocketServer, WebSocket } from "ws"
+import { saveRoom, savePlayer, deletePlayer, deleteRoom } from "./db"
 
-const PORT = parseInt(process.env['SERVER_PORT'] ?? '4000', 10)
+// create a basic http server (needed to attach websocket server to it)
+const server = http.createServer()
 
-const server = http.createServer(async (req, res) => {
-  await handleRequest(req, res)
-})
-
+// create the websocket server on top of the http server
 const wss = new WebSocketServer({ server })
 
-wss.on('connection', (ws: WebSocket) => {
-  const playerId = uuid()
-  let currentRoomId: string | null = null
+// this holds all the active rooms and their players in memory
+// Structure: { [roomId]: { players: { [id]: { name, class, x, y, hp, maxHp, ws } } } }
+const rooms: any = {}
 
-  console.log(`[+] ${playerId} connected`)
-  send(ws, { type: 'WELCOME', playerId })
+// max hp for each character class (matches the frontend character select screen)
+const CLASS_HP: any = { warrior: 100, mage: 70, rogue: 85 }
 
-  ws.on('message', (raw: Buffer) => {
-    let msg: ClientMessage
-    try {
-      msg = JSON.parse(raw.toString()) as ClientMessage
-    } catch {
-      return
+// this function sends a message to every player in a room
+// we need this because unlike socket.io, raw websocket has no built-in broadcast
+function broadcast(roomId: string, data: any) {
+  const room = rooms[roomId]
+  if (!room) return
+  for (const id in room.players) {
+    const player = room.players[id]
+    // only send if the connection is still open
+    if (player.ws.readyState === WebSocket.OPEN) {
+      player.ws.send(JSON.stringify(data))
+    }
+  }
+}
+
+// this runs every time a new player connects to the websocket server
+wss.on("connection", (socket: any) => {
+
+  // give this socket a unique id (like socket.id in socket.io)
+  socket.id = Math.random().toString(36).slice(2, 10)
+  console.log("socket connected:", socket.id)
+
+  // tell the player their own id so the frontend knows who they are
+  // server → frontend: { "type": "WELCOME", "playerId": "jkdtk5j2" }
+  socket.send(JSON.stringify({ type: "WELCOME", playerId: socket.id }))
+
+  // listen for messages sent by this player
+  socket.on("message", (raw: any) => {
+    const msg = JSON.parse(raw)
+
+    // ── player wants to join a room ───────────────────────────────────────────
+    // frontend → server: { "type": "JOIN_ROOM", "roomId": "ABC123", "name": "Hero", "playerClass": "warrior" }
+    if (msg.type === "JOIN_ROOM") {
+      const { roomId, name, playerClass } = msg
+
+      // create the room if it doesn't exist yet
+      if (!rooms[roomId]) {
+        rooms[roomId] = { players: {} }
+        saveRoom(roomId)  // persist room to dynamodb
+      }
+
+      // add this player to the room
+      rooms[roomId].players[socket.id] = {
+        id: socket.id,
+        name,
+        class: playerClass,
+        x: 320,          // spawn position in pixels (tile 5 x 64px)
+        y: 320,          // spawn position in pixels (tile 5 x 64px)
+        hp: CLASS_HP[playerClass] ?? 100,
+        maxHp: CLASS_HP[playerClass] ?? 100,
+        ws: socket,      // store the socket so we can send messages to this player later
+      }
+
+      console.log(`${name} joined room ${roomId}`)
+      savePlayer(socket.id, roomId, name, playerClass, CLASS_HP[playerClass] ?? 100)  // persist player to dynamodb
+
+      // tell everyone already in the room that a new player arrived
+      // server → everyone else: { "type": "PLAYER_JOINED", "id": "jkdtk5j2", "name": "Hero", "class": "warrior", "x": 320, "y": 320 }
+      for (const id in rooms[roomId].players) {
+        if (id === socket.id) continue  // skip the new player themselves
+        const other = rooms[roomId].players[id]
+        if (other.ws.readyState === WebSocket.OPEN) {
+          other.ws.send(JSON.stringify({ type: "PLAYER_JOINED", id: socket.id, name, class: playerClass, x: 320, y: 320 }))
+        }
+      }
+
+      // send the new player the list of everyone already in the room
+      // server → new player: { "type": "ROOM_STATE", "players": [{ "id": "abc", "name": "Hero", "x": 320, "y": 320, ... }] }
+      socket.send(JSON.stringify({
+        type: "ROOM_STATE",
+        players: Object.values(rooms[roomId].players).map((p: any) => ({
+          id: p.id, name: p.name, class: p.class, x: p.x, y: p.y, hp: p.hp, maxHp: p.maxHp,
+        })),
+      }))
     }
 
-    switch (msg.type) {
-      case 'JOIN_ROOM': {
-        currentRoomId = msg.roomId
-        const state = roomManager.getOrCreate(msg.roomId, msg.biome)
-        const player = roomManager.addPlayer(state, playerId, msg.name, msg.class, ws)
+    // ── player moved — update position and tell everyone else ─────────────────
+    // frontend → server: { "type": "PLAYER_MOVE", "roomId": "ABC123", "x": 400, "y": 300 }
+    if (msg.type === "PLAYER_MOVE") {
+      const { roomId, x, y } = msg
 
-        broadcastExcept(state, playerId, { type: 'PLAYER_JOINED', player: toPublic(player) })
-
-        // Send map definition so client can render tiles, doors, etc.
-        send(ws, {
-          type: 'LOAD_ROOM',
-          roomId: state.roomDef.id,
-          mapData: state.roomDef,
-          spawnPoints: { [playerId]: { x: player.x, y: player.y } },
-        })
-
-        const others = Object.values(state.players)
-          .filter(p => p.id !== playerId)
-          .map(toPublic)
-        send(ws, { type: 'ROOM_STATE', players: others })
-
-        startLoop(state)
-        console.log(`[=] ${msg.name} (${msg.class}) → room ${msg.roomId}`)
-        break
+      // update their position on the server
+      if (rooms[roomId]?.players[socket.id]) {
+        rooms[roomId].players[socket.id].x = x
+        rooms[roomId].players[socket.id].y = y
       }
 
-      case 'INPUT': {
-        if (!currentRoomId) break
-        const state = roomManager.get(currentRoomId)
-        if (!state) break
-        state.inputBuffer[playerId]?.push(msg)
-        break
-      }
-
-      case 'ATTACK':
-      case 'ABILITY':
-      case 'INTERACT':
-      case 'USE_ITEM':
-      case 'DROP_ITEM':
-      case 'BETRAY': {
-        if (!currentRoomId) break
-        const state = roomManager.get(currentRoomId)
-        if (!state) break
-        state.inputBuffer[playerId]?.push(msg)
-        break
+      // broadcast new position to everyone else in the room
+      // server → everyone else: { "type": "PLAYER_MOVED", "id": "jkdtk5j2", "x": 400, "y": 300 }
+      for (const id in rooms[roomId]?.players) {
+        if (id === socket.id) continue  // don't send back to the player who moved
+        const other = rooms[roomId].players[id]
+        if (other.ws.readyState === WebSocket.OPEN) {
+          other.ws.send(JSON.stringify({ type: "PLAYER_MOVED", id: socket.id, x, y }))
+        }
       }
     }
   })
 
-  ws.on('close', () => {
-    console.log(`[-] ${playerId} disconnected`)
-    if (!currentRoomId) return
+  // ── player disconnected ───────────────────────────────────────────────────
+  socket.on("close", () => {
 
-    const state = roomManager.get(currentRoomId)
-    if (!state) return
+    // find which room this player was in
+    for (const roomId in rooms) {
+      const room = rooms[roomId]
 
-    roomManager.removePlayer(state, playerId)
-    broadcastAll(state, { type: 'PLAYER_LEFT', id: playerId })
+      if (room.players[socket.id]) {
+        const { name } = room.players[socket.id]
 
-    if (Object.keys(state.players).length === 0) {
-      stopLoop(currentRoomId)
-      roomManager.delete(currentRoomId)
-      releaseRoom(currentRoomId)
-      console.log(`[x] Room ${currentRoomId} closed`)
+        // remove them from the room
+        delete room.players[socket.id]
+        deletePlayer(socket.id, roomId)  // remove player from dynamodb
+        console.log(`${name} left room ${roomId}`)
+
+        // tell everyone else in the room this player left
+        // server → everyone else: { "type": "PLAYER_LEFT", "id": "jkdtk5j2" }
+        broadcast(roomId, { type: "PLAYER_LEFT", id: socket.id })
+
+        // if the room is now empty, delete it to free memory
+        if (Object.keys(room.players).length === 0) {
+          delete rooms[roomId]
+          deleteRoom(roomId)  // remove room from dynamodb
+          console.log(`Room ${roomId} deleted — no players left`)
+        }
+
+        break // stop looking once we found the room
+      }
     }
   })
-
-  ws.on('error', (err: Error) => console.error('WS error:', err))
 })
 
-function send(ws: WebSocket, data: object): void {
-  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data))
-}
-
-function broadcastExcept(state: GameState, exceptId: string, data: object): void {
-  const str = JSON.stringify(data)
-  for (const p of Object.values(state.players)) {
-    if (p.id !== exceptId && p.ws.readyState === WebSocket.OPEN) p.ws.send(str)
-  }
-}
-
-function broadcastAll(state: GameState, data: object): void {
-  const str = JSON.stringify(data)
-  for (const p of Object.values(state.players)) {
-    if (p.ws.readyState === WebSocket.OPEN) p.ws.send(str)
-  }
-}
-
-server.listen(PORT, () => {
-  console.log(`Game server running`)
-  console.log(`  WS  — ws://localhost:${PORT}`)
-  console.log(`  API — http://localhost:${PORT}/api`)
-
-  // Connect to Redis then start announcing this server to the registry
-  connectRedis()
-    .then(() => startHeartbeat(() => roomManager.size()))
-    .catch(err => console.warn('[redis] unavailable, running single-server mode:', (err as Error).message))
-})
+// start the server on port 4000
+const PORT = 4000
+server.listen(PORT, () => console.log(`Game server running on port ${PORT}`))
