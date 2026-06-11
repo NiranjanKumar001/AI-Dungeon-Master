@@ -224,9 +224,6 @@ export interface MsgJoinRoom {
 export interface MsgInput {
   type: 'INPUT'
   keys: string[]
-  mouseX: number
-  mouseY: number
-  seq: number
 }
 
 export interface MsgAttack {
