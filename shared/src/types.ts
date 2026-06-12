@@ -51,5 +51,5 @@ export interface StateMessage {
 
 export interface PlayerLeftMessage {
     type: "PLAYER_LEFT",
-    id: string
+    player: Player
 }

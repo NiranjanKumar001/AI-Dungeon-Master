@@ -250,7 +250,13 @@ export function createGameScene(Phaser: any) {
                 }
 
                 case "PLAYER_LEFT": {
-                    this._removeRemotePlayer(msg.id);
+                    this._removeRemotePlayer(msg.player);
+                    this.statusText.setText(
+                        `${msg.player.name} left the dungeon`
+                    ).setColor('#a78bfa')
+                    this.time.delayedCall(3000, () => {
+                        if (this.statusText) this.statusText.setText("").setColor("#fff");
+                    })
                     break;
                 }
             }
@@ -281,15 +287,15 @@ export function createGameScene(Phaser: any) {
             console.log(`Remote player added: ${playerData.name} (${playerData.playerClass})`)
         }
 
-        _removeRemotePlayer(playerId: string) {
-            const rp = this.remotePlayers[playerId];
+        _removeRemotePlayer(player: Player) {
+            const rp = this.remotePlayers[player.id];
             if (!rp) return;
 
             rp.sprite.destroy();
             rp.label.destroy();
-            delete this.remotePlayers[playerId];
+            delete this.remotePlayers[player.id];
 
-            console.log(`Remote player removed: ${playerId}`)
+            console.log(`Remote player removed: ${player.id}`)
         }
 
         // utilities

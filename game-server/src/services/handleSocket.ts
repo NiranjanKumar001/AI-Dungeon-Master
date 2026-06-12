@@ -88,12 +88,13 @@ export function handleClose(socket: any) {
             const name = room.players[socket.id].name;
 
             // remove them from the room
+            const player = room.players[socket.id];
             delete room.players[socket.id];
             deletePlayer(socket.id, roomId);
             console.log(`${name} left room ${roomId}`)
 
             // broadcast to everyone else
-            broadcast(roomId, { type: "PLAYER_LEFT", id: socket.id });
+            broadcast(roomId, { type: "PLAYER_LEFT", player: player });
         }
     }
 }
