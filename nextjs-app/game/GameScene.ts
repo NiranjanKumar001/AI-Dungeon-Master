@@ -1,4 +1,4 @@
-import type { ClientMessage, PlayerClass, PlayerPublic, ServerMessage } from '../../game-server/src/types';
+import { ClientMessage, Player, PlayerClass, ServerMessage } from "../../shared/src/types";
 
 export function createGameScene(Phaser: any) {
     return class GameScene extends Phaser.Scene {
@@ -179,13 +179,11 @@ export function createGameScene(Phaser: any) {
                 console.log('✅ Connected to game server')
                 this.statusText.setText('Connected ✓')
                     .setColor('#22c55e')
-                this._wsSend({ type: "JOIN_ROOM", roomId: this.roomId, name: this.playerName, class: this.playerClass });
+                this._wsSend({ type: "JOIN_ROOM", roomId: this.roomId, name: this.playerName, playerClass: this.playerClass });
             }
 
-            this.ws.onmessage = (event) => {
-                let msg;
-                try { msg = JSON.parse(event.data) }
-                catch { return }
+            this.ws.onmessage = (event: MessageEvent) => {
+                const msg: ServerMessage = JSON.parse(event.data);
                 this._handleMessage(msg);
             }
 
@@ -209,13 +207,6 @@ export function createGameScene(Phaser: any) {
                     break
                 }
 
-                case "ROOM_STATE": {
-                    for (const player of msg.players) {
-                        this._addRemotePlayer(player);
-                    }
-                    break;
-                }
-
                 case "PLAYER_JOINED": {
                     this._addRemotePlayer(msg.player);
                     this.statusText.setText(
@@ -225,6 +216,13 @@ export function createGameScene(Phaser: any) {
                         if (this.statusText) this.statusText.setText("").setColor("#fff");
                     })
                     break
+                }
+                
+                case "ROOM_STATE": {
+                    for (const player of msg.players) {
+                        this._addRemotePlayer(player);
+                    }
+                    break;
                 }
 
                 case "STATE": {
@@ -238,9 +236,9 @@ export function createGameScene(Phaser: any) {
                                 `${this.playerName}  (${this.playerClass})  ❤️ ${this.myHp}/${this.myMaxHp}`
                             )
                         } else {
-                            if(!this.remotePlayers[playerData.id]) {
+                            if (!this.remotePlayers[playerData.id]) {
                                 this._addRemotePlayer(playerData);
-                            }else{
+                            } else {
                                 const rp = this.remotePlayers[playerData.id];
                                 rp.sprite.x = playerData.x;
                                 rp.sprite.y = playerData.y;
@@ -258,12 +256,12 @@ export function createGameScene(Phaser: any) {
             }
         }
 
-        _addRemotePlayer(playerData: PlayerPublic) {
+        _addRemotePlayer(playerData: Player) {
             if (playerData.id === this.myId) return;
 
             if (this.remotePlayers[playerData.id]) return;  // duplicates handle
 
-            const textureKey = playerData.class || "warrior";
+            const textureKey = playerData.playerClass || "warrior";
             const sprite = this.add.sprite(
                 playerData.x,
                 playerData.y,
@@ -277,15 +275,15 @@ export function createGameScene(Phaser: any) {
                 hp: playerData.hp,
                 maxHp: playerData.maxHp,
                 name: playerData.name,
-                class: playerData.class,
+                class: playerData.playerClass,
             }
 
-            console.log(`Remote player added: ${playerData.name} (${playerData.class})`)
+            console.log(`Remote player added: ${playerData.name} (${playerData.playerClass})`)
         }
 
         _removeRemotePlayer(playerId: string) {
             const rp = this.remotePlayers[playerId];
-            if(!rp) return;
+            if (!rp) return;
 
             rp.sprite.destroy();
             rp.label.destroy();
@@ -296,7 +294,7 @@ export function createGameScene(Phaser: any) {
 
         // utilities
         _wsSend(data: ClientMessage) {
-            if(this.ws && this.ws.readyState === WebSocket.OPEN) {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                 this.ws.send(JSON.stringify(data));
             }
         }

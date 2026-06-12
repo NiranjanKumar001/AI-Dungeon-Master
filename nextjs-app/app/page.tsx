@@ -21,7 +21,7 @@ export default function Home() {
   function joinRoom() {
     const trimmed = code.trim().toUpperCase();
     if(trimmed.length === 6) {
-      router.push(`/room/${trimmed}/charater`);
+      router.push(`/room/${trimmed}/character`);
     }
   }
 
