@@ -2,6 +2,7 @@ import { WebSocket } from "ws";
 import { ClientMessage, Player } from "../../../shared/src/types";
 import { deletePlayer, savePlayer, saveRoom } from "../db";
 import { sendMessage } from "../utility/utility";
+import { applyMovement } from "../helpers/socketHelpers";
 
 // interface/types
 interface ServerPlayer extends Player {
@@ -16,6 +17,7 @@ const TICK_RATE = 50;
 const SPEED = 6;
 const rooms: Record<string, Room> = {}
 const CLASS_HP: Record<string, number> = { warrior: 100, mage: 70, rogue: 85 };
+
 
 function broadcast(roomId: string, data: any) {
     const room = rooms[roomId]
@@ -108,23 +110,33 @@ setInterval(() => {
             const player = room.players[id];
             const keys = player.keys || [];
 
-            if (keys.includes("W")) player.y -= SPEED;
-            if (keys.includes("S")) player.y += SPEED;
-            if (keys.includes("A")) player.x -= SPEED;
-            if (keys.includes("D")) player.x += SPEED;
+            let dx = 0, dy = 0;
+            if (keys.includes("W")) dy -= SPEED;
+            if (keys.includes("S")) dy += SPEED;
+            if (keys.includes("A")) dx -= SPEED;
+            if (keys.includes("D")) dx += SPEED;
 
-            broadcast(roomId, {
-                type: 'STATE',
-                players: Object.values(room.players).map(p => ({
-                    id: p.id,
-                    name: p.name,
-                    playerClass: p.playerClass,
-                    x: p.x,
-                    y: p.y,
-                    hp: p.hp,
-                    maxHp: p.maxHp,
-                }))
-            })
+            if (dx !== 0 && dy !== 0) {
+                // digonal normalization
+                dx /= 1.414;
+                dy /= 1.414;
+            }
+
+            applyMovement(player, dx, dy);
         }
+
+        // broadcast at once
+        broadcast(roomId, {
+            type: 'STATE',
+            players: Object.values(room.players).map(p => ({
+                id: p.id,
+                name: p.name,
+                playerClass: p.playerClass,
+                x: p.x,
+                y: p.y,
+                hp: p.hp,
+                maxHp: p.maxHp,
+            }))
+        })
     }
 }, TICK_RATE)
